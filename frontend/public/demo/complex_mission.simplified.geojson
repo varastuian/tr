@@ -1,0 +1,134 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -122.08409,
+            37.42206
+          ],
+          [
+            -122.08398,
+            37.42222
+          ],
+          [
+            -122.08322,
+            37.4235
+          ],
+          [
+            -122.08333,
+            37.42386
+          ],
+          [
+            -122.084095,
+            37.424215
+          ],
+          [
+            -122.08388,
+            37.42412
+          ]
+        ]
+      },
+      "properties": {
+        "name": "complex_mission.simplified",
+        "kind": "route"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.08409,
+          37.42206
+        ]
+      },
+      "properties": {
+        "seq": 0,
+        "command": 22,
+        "alt": 20.0
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.08398,
+          37.42222
+        ]
+      },
+      "properties": {
+        "seq": 1,
+        "command": 16,
+        "alt": 25.0
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.08322,
+          37.4235
+        ]
+      },
+      "properties": {
+        "seq": 2,
+        "command": 16,
+        "alt": 25.0
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.08333,
+          37.42386
+        ]
+      },
+      "properties": {
+        "seq": 3,
+        "command": 16,
+        "alt": 25.0
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.084095,
+          37.424215
+        ]
+      },
+      "properties": {
+        "seq": 4,
+        "command": 16,
+        "alt": 25.0
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.08388,
+          37.42412
+        ]
+      },
+      "properties": {
+        "seq": 5,
+        "command": 21,
+        "alt": 0.0
+      }
+    }
+  ],
+  "properties": {
+    "name": "complex_mission.simplified"
+  }
+}

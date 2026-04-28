@@ -1,0 +1,21 @@
+{
+  "mission": [
+    { "seq": 0, "command": 22, "frame": 3, "lat": 37.422060, "lon": -122.084090, "alt": 20 },
+    { "seq": 1, "command": 16, "frame": 3, "lat": 37.422300, "lon": -122.083900, "alt": 25 },
+    { "seq": 2, "command": 16, "frame": 3, "lat": 37.422540, "lon": -122.083650, "alt": 25 },
+    { "seq": 3, "command": 19, "frame": 3, "lat": 37.422540, "lon": -122.083650, "alt": 25, "param1": 15 },
+    { "seq": 4, "command": 16, "frame": 3, "lat": 37.422820, "lon": -122.083420, "alt": 25 },
+    { "seq": 5, "command": 16, "frame": 3, "lat": 37.423100, "lon": -122.083180, "alt": 25 },
+    { "seq": 6, "command": 18, "frame": 3, "lat": 37.423100, "lon": -122.083180, "alt": 25, "param1": 2 },
+    { "seq": 7, "command": 16, "frame": 3, "lat": 37.423250, "lon": -122.083080, "alt": 25 },
+    { "seq": 8, "command": 16, "frame": 3, "lat": 37.423380, "lon": -122.083020, "alt": 25 },
+    { "seq": 9, "command": 16, "frame": 3, "lat": 37.423530, "lon": -122.083000, "alt": 25 },
+    { "seq": 10, "command": 16, "frame": 3, "lat": 37.423700, "lon": -122.083050, "alt": 25 },
+    { "seq": 11, "command": 16, "frame": 3, "lat": 37.423860, "lon": -122.083200, "alt": 25 },
+    { "seq": 12, "command": 17, "frame": 3, "lat": 37.423860, "lon": -122.083200, "alt": 25 },
+    { "seq": 13, "command": 16, "frame": 3, "lat": 37.424020, "lon": -122.083500, "alt": 25 },
+    { "seq": 14, "command": 16, "frame": 3, "lat": 37.424120, "lon": -122.083880, "alt": 25 },
+    { "seq": 15, "command": 21, "frame": 3, "lat": 37.424120, "lon": -122.083880, "alt": 0 }
+  ]
+}
+

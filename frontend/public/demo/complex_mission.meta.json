@@ -1,0 +1,12 @@
+{
+  "config": {
+    "remove_loiter": true,
+    "min_separation_m": 2.0,
+    "min_turn_deg": 6.0,
+    "rdp_epsilon_m": 10.0
+  },
+  "counts": {
+    "taught_items": 25,
+    "simplified_items": 6
+  }
+}

@@ -1,0 +1,20 @@
+[project]
+name = "uav-route"
+version = "0.1.0"
+description = "Teach & repeat route simplifier for ArduPilot missions (loiter removal + RDP) with GeoJSON export."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+]
+
+[project.scripts]
+uav-route-demo = "uav_route.demo.generate_demo:main"
+uav-tiles = "uav_route.tiles.server:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uav_route"]
+
