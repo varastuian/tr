@@ -32,3 +32,21 @@ Then in the frontend, pick the basemap:
 
 - `Local cache (offline) — http://127.0.0.1:8000`
 
+### Python-only teach & repeat (no frontend logic)
+
+Record taught route from SITL telemetry and save into track library:
+
+```bash
+uav-teach-repeat record --connection udp:127.0.0.1:14550 --seconds 120 --name sitl_path_1
+```
+
+Repeat the simplified route in GUIDED mode (reverse for return-to-home style):
+
+```bash
+uav-teach-repeat repeat --connection udp:127.0.0.1:14550 --track sitl_path_1 --reverse --rtl-end
+```
+
+Notes:
+- `record` samples `GLOBAL_POSITION_INT` and stores taught + simplified GeoJSON via `track_library.py`.
+- `repeat` sends GUIDED position targets waypoint-by-waypoint and waits for arrival radius.
+

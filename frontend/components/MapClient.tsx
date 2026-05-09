@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CircleMarker,
   GeoJSON,
@@ -16,6 +16,9 @@ import type { Feature, FeatureCollection, GeoJsonObject, Geometry } from "geojso
 import L from "leaflet";
 
 type AnyFC = FeatureCollection<Geometry, Record<string, unknown>>;
+
+/** ~1.5e-5° lat ≈ 1.7 m — ignore smaller jitter from MAVLink so we do not re-pan every poll. */
+const FOLLOW_EPS_DEG = 1.5e-5;
 
 function isFeatureCollection(x: unknown): x is AnyFC {
   return (
@@ -43,8 +46,10 @@ export default function MapClient({
   uavMapZoom = 17,
   autoPan = false,
   showCameraOverlay = true,
-  cameraSource = "sim_tile",
-  gazeboCameraUrl = "http://127.0.0.1:8080/stream?topic=/camera/image_raw",
+  cameraSource = "gazebo",
+  gazeboCameraUrl = "http://127.0.0.1:8080/stream",
+  /** Sim tile overlay only: nadir = top-down map + crosshair; forward = heading cue line. */
+  cameraSimMode = "forward",
 }: {
   taught?: AnyFC | null;
   simplified?: AnyFC | null;
@@ -63,6 +68,7 @@ export default function MapClient({
   showCameraOverlay?: boolean;
   cameraSource?: "sim_tile" | "gazebo";
   gazeboCameraUrl?: string;
+  cameraSimMode?: "nadir" | "forward";
 }) {
   const [taught, setTaught] = useState<AnyFC | null>(taughtProp ?? null);
   const [simplified, setSimplified] = useState<AnyFC | null>(simplifiedProp ?? null);
@@ -117,9 +123,28 @@ export default function MapClient({
     zoom: number;
   }) {
     const map = useMap();
+    const lastCenterRef = useRef<[number, number] | null>(null);
+    const lastZoomRef = useRef<number | null>(null);
+
     useEffect(() => {
-      if (!enabled) return;
-      map.flyTo([lat, lon], zoom, { duration: 0.35 });
+      if (!enabled) {
+        lastCenterRef.current = null;
+        lastZoomRef.current = null;
+        return;
+      }
+      const prev = lastCenterRef.current;
+      const moved =
+        prev === null ||
+        Math.abs(prev[0] - lat) > FOLLOW_EPS_DEG ||
+        Math.abs(prev[1] - lon) > FOLLOW_EPS_DEG;
+      const zoomChanged = lastZoomRef.current !== zoom;
+
+      if (moved || zoomChanged) {
+        // flyTo + poll jitter caused a visible “shake” every ~800ms; instant setView is stable.
+        map.setView([lat, lon], zoom, { animate: false });
+        lastCenterRef.current = [lat, lon];
+        lastZoomRef.current = zoom;
+      }
     }, [enabled, lat, lon, zoom, map]);
     return null;
   }
@@ -136,7 +161,7 @@ export default function MapClient({
           />
         ) : null}
         <LayersControl position="topright">
-          <LayersControl.BaseLayer checked name="Satellite + labels (Esri)">
+          <LayersControl.BaseLayer name="Satellite + labels (Esri)">
             <>
               <TileLayer
                 attribution='Tiles &copy; Esri'
@@ -150,7 +175,7 @@ export default function MapClient({
             </>
           </LayersControl.BaseLayer>
 
-          <LayersControl.BaseLayer name="Google (unofficial) — Hybrid">
+          <LayersControl.BaseLayer checked name="Google (unofficial) — Hybrid">
             <TileLayer
               attribution="Google (unofficial tile access)"
               url="https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
@@ -316,7 +341,9 @@ export default function MapClient({
           >
             {cameraSource === "gazebo"
               ? "Gazebo camera view"
-              : `Sim camera view (tile) z=${cameraZoom}`}
+              : cameraSimMode === "nadir"
+                ? `Nadir sim (tile) z=${cameraZoom}`
+                : `Forward cue sim (tile) z=${cameraZoom}`}
           </div>
           {cameraSource === "gazebo" ? (
             <iframe
@@ -344,6 +371,35 @@ export default function MapClient({
                 radius={5}
                 pathOptions={{ color: "#ef4444", weight: 2 }}
               />
+              {cameraSimMode === "nadir" ? (
+                <>
+                  <Polyline
+                    positions={[
+                      [liveState.lat - 0.00012, liveState.lon],
+                      [liveState.lat + 0.00012, liveState.lon],
+                    ]}
+                    pathOptions={{ color: "#64748b", weight: 1, opacity: 0.9 }}
+                  />
+                  <Polyline
+                    positions={[
+                      [liveState.lat, liveState.lon - 0.00012],
+                      [liveState.lat, liveState.lon + 0.00012],
+                    ]}
+                    pathOptions={{ color: "#64748b", weight: 1, opacity: 0.9 }}
+                  />
+                </>
+              ) : (
+                <Polyline
+                  positions={[
+                    [liveState.lat, liveState.lon],
+                    [
+                      liveState.lat + 0.00018 * Math.cos((liveState.heading_deg * Math.PI) / 180),
+                      liveState.lon + 0.00018 * Math.sin((liveState.heading_deg * Math.PI) / 180),
+                    ],
+                  ]}
+                  pathOptions={{ color: "#f97316", weight: 3 }}
+                />
+              )}
             </MapContainer>
           )}
         </div>

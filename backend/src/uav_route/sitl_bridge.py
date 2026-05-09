@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
+
+from uav_route.geo import LL, haversine_m
+from uav_route.geojson import mission_to_geojson
+from uav_route.mission import MAV_CMD, MissionItem
+from uav_route.simplify import SimplifyConfig, simplify_mission
+from uav_route.track_library import save_track
+from uav_route.vbn_path import init_playback, step_playback
 
 
 class BridgeState:
@@ -22,9 +30,17 @@ class BridgeState:
         self.groundspeed = 0.0
         self.last_command = ""
         self.camera_zoom = 20
+        self.gimbal_preset = ""
+        self.gps_disabled = False
+        self.ekf_no_gps = False
+        self.recording = False
+        self.recording_name = ""
+        self.recording_min_sep_m = 1.5
+        self.recorded_points: list[MissionItem] = []
         self.error = ""
         self.master = None
         self.worker: threading.Thread | None = None
+        self.vbn_playback: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -40,7 +56,14 @@ class BridgeState:
                 "groundspeed": self.groundspeed,
                 "last_command": self.last_command,
                 "camera_zoom": self.camera_zoom,
+                "gimbal_preset": self.gimbal_preset,
+                "gps_disabled": self.gps_disabled,
+                "ekf_no_gps": self.ekf_no_gps,
+                "recording": self.recording,
+                "recording_points": len(self.recorded_points),
+                "recording_name": self.recording_name,
                 "error": self.error,
+                "vbn_ready": self.vbn_playback is not None,
             }
 
 
@@ -52,11 +75,20 @@ def _set_error(msg: str) -> None:
         STATE.error = msg
 
 
+def _pymavlink_import_error(exc: BaseException) -> str:
+    return (
+        f"pymavlink import failed ({type(exc).__name__}: {exc}). "
+        f"This bridge is running as: {sys.executable}. "
+        "Use the same environment: cd backend && source .venv/bin/activate && "
+        "pip install -e . && PYTHONPATH=src python -m uav_route.sitl_bridge — then restart the bridge."
+    )
+
+
 def _telemetry_loop() -> None:
     try:
         from pymavlink import mavutil  # type: ignore
-    except Exception:
-        _set_error("pymavlink not installed. Install in your venv: pip install pymavlink")
+    except Exception as e:
+        _set_error(_pymavlink_import_error(e))
         return
 
     while True:
@@ -81,12 +113,14 @@ def _telemetry_loop() -> None:
                 if msg is None:
                     continue
                 t = msg.get_type()
+                record_sample: tuple[float, float, float] | None = None
                 with STATE.lock:
                     if t == "GLOBAL_POSITION_INT":
                         STATE.lat = msg.lat / 1e7
                         STATE.lon = msg.lon / 1e7
                         STATE.alt_m = msg.relative_alt / 1000.0
                         STATE.heading_deg = (msg.hdg / 100.0) if msg.hdg != 65535 else STATE.heading_deg
+                        record_sample = (STATE.lat, STATE.lon, STATE.alt_m)
                     elif t == "VFR_HUD":
                         STATE.groundspeed = float(msg.groundspeed)
                     elif t == "HEARTBEAT":
@@ -96,6 +130,8 @@ def _telemetry_loop() -> None:
                         STATE.mode = mavutil.mode_string_v10(msg)
                     elif t == "ATTITUDE":
                         pass
+                if record_sample is not None:
+                    _record_tick(*record_sample)
         except Exception as e:
             with STATE.lock:
                 STATE.connected = False
@@ -115,8 +151,8 @@ def _ensure_worker() -> None:
 def _send_command(action: str) -> None:
     try:
         from pymavlink import mavutil  # type: ignore
-    except Exception:
-        _set_error("pymavlink not installed. Install in your venv: pip install pymavlink")
+    except Exception as e:
+        _set_error(_pymavlink_import_error(e))
         return
 
     with STATE.lock:
@@ -160,6 +196,190 @@ def _send_command(action: str) -> None:
         master.set_mode(mode_id)
     else:
         _set_error(f"Unknown command: {action}")
+
+
+def _apply_gimbal(payload: dict[str, Any]) -> None:
+    try:
+        from uav_route.gimbal_rc import apply_preset, send_gimbal_rc
+    except Exception as e:
+        _set_error(_pymavlink_import_error(e))
+        return
+
+    with STATE.lock:
+        master = STATE.master
+    if master is None:
+        _set_error("Not connected to SITL yet")
+        return
+
+    try:
+        if "roll_pwm" in payload or "pitch_pwm" in payload or "yaw_pwm" in payload:
+            roll = payload.get("roll_pwm")
+            pitch = payload.get("pitch_pwm")
+            yaw = payload.get("yaw_pwm")
+            send_gimbal_rc(
+                master,
+                int(roll) if roll is not None else None,
+                int(pitch) if pitch is not None else None,
+                int(yaw) if yaw is not None else None,
+            )
+            label = "custom_pwm"
+        else:
+            preset = str(payload.get("preset", "neutral"))
+            apply_preset(master, preset)
+            label = preset
+        with STATE.lock:
+            STATE.gimbal_preset = label
+            STATE.error = ""
+    except ValueError as e:
+        _set_error(str(e))
+    except Exception as e:
+        _set_error(f"gimbal RC override failed: {e}")
+
+
+def _set_param(master: Any, name: str, value: float) -> None:
+    # Use a short timeout because this endpoint may set multiple params in sequence.
+    master.mav.param_set_send(
+        master.target_system,
+        master.target_component,
+        name.encode("ascii"),
+        float(value),
+        9,  # MAV_PARAM_TYPE_REAL32
+    )
+    master.recv_match(type="PARAM_VALUE", blocking=False, timeout=0.25)
+
+
+def _set_gps_disabled(disabled: bool) -> None:
+    with STATE.lock:
+        master = STATE.master
+    if master is None:
+        _set_error("Not connected to SITL yet")
+        return
+
+    # Try common ArduPilot SIM GPS knobs. Not every build has every param.
+    wanted = 0.0 if disabled else 1.0
+    param_names = ("SIM_GPS1_ENABLE", "SIM_GPS2_ENABLE", "SIM_GPS_DISABLE")
+    set_any = False
+    for name in param_names:
+        try:
+            value = wanted if name != "SIM_GPS_DISABLE" else (1.0 if disabled else 0.0)
+            _set_param(master, name, value)
+            set_any = True
+        except Exception:
+            continue
+
+    if not set_any:
+        _set_error(
+            "Could not set SIM GPS params (tried SIM_GPS1_ENABLE, SIM_GPS2_ENABLE, SIM_GPS_DISABLE)."
+        )
+        return
+
+    with STATE.lock:
+        STATE.gps_disabled = disabled
+        STATE.error = ""
+
+
+def _set_ekf_no_gps(disabled: bool) -> None:
+    with STATE.lock:
+        master = STATE.master
+    if master is None:
+        _set_error("Not connected to SITL yet")
+        return
+
+    disabled_values = {
+        "EK3_SRC1_POSXY": 0.0,
+        "EK3_SRC1_VELXY": 0.0,
+        "EK3_SRC1_POSZ": 0.0,
+        "EK3_SRC1_VELZ": 0.0,
+    }
+    enabled_values = {
+        "EK3_SRC1_POSXY": 3.0,
+        "EK3_SRC1_VELXY": 3.0,
+        "EK3_SRC1_POSZ": 1.0,
+        "EK3_SRC1_VELZ": 3.0,
+    }
+    values = disabled_values if disabled else enabled_values
+    set_any = False
+    for name, value in values.items():
+        try:
+            _set_param(master, name, value)
+            set_any = True
+        except Exception:
+            continue
+    if not set_any:
+        _set_error("Could not set EKF params (tried EK3_SRC1_POSXY/VELXY/POSZ/VELZ).")
+        return
+    with STATE.lock:
+        STATE.ekf_no_gps = disabled
+        STATE.error = ""
+
+
+def _record_tick(lat: float, lon: float, alt_m: float) -> None:
+    with STATE.lock:
+        if not STATE.recording:
+            return
+        last = STATE.recorded_points[-1] if STATE.recorded_points else None
+        if last and last.lat is not None and last.lon is not None:
+            if haversine_m(LL(last.lat, last.lon), LL(lat, lon)) < STATE.recording_min_sep_m:
+                return
+        seq = len(STATE.recorded_points)
+        STATE.recorded_points.append(
+            MissionItem(
+                seq=seq,
+                command=int(MAV_CMD.NAV_WAYPOINT),
+                frame=3,
+                lat=lat,
+                lon=lon,
+                alt=alt_m,
+                raw={"source": "bridge_record"},
+            )
+        )
+
+
+def _start_recording(payload: dict[str, Any]) -> None:
+    name = str(payload.get("name", "")).strip() or f"sitl_record_{int(time.time())}"
+    min_sep_m = max(0.1, min(20.0, float(payload.get("min_sep_m", 1.5))))
+    with STATE.lock:
+        STATE.recording = True
+        STATE.recording_name = name
+        STATE.recording_min_sep_m = min_sep_m
+        STATE.recorded_points = []
+        STATE.error = ""
+
+
+def _stop_recording(payload: dict[str, Any]) -> dict[str, Any]:
+    with STATE.lock:
+        points = list(STATE.recorded_points)
+        name = STATE.recording_name or f"sitl_record_{int(time.time())}"
+        min_sep_m = STATE.recording_min_sep_m
+        STATE.recording = False
+    if len(points) < 2:
+        raise RuntimeError("Recorded too few route points; fly longer before stopping")
+
+    min_turn_deg = max(0.0, float(payload.get("min_turn_deg", 6.0)))
+    rdp_epsilon_m = max(0.1, float(payload.get("rdp_epsilon_m", 8.0)))
+    simplified = simplify_mission(
+        points,
+        SimplifyConfig(
+            remove_loiter=True,
+            min_separation_m=min_sep_m,
+            min_turn_deg=min_turn_deg,
+            rdp_epsilon_m=rdp_epsilon_m,
+        ),
+    )
+    taught_fc = mission_to_geojson(points, "taught")
+    simplified_fc = mission_to_geojson(simplified, "simplified")
+    rec = save_track(taught_fc, simplified_fc, name=name)
+    with STATE.lock:
+        STATE.error = ""
+    return {
+        "ok": True,
+        "id": rec.id,
+        "name": rec.name,
+        "points": len(points),
+        "simplified_points": len(simplified),
+        "taught_fc": taught_fc,
+        "simplified_fc": simplified_fc,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -213,6 +433,95 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.camera_zoom = max(15, min(22, zoom))
             self._send_json(200, {"ok": True, "camera_zoom": STATE.camera_zoom})
             return
+        if p == "/api/gimbal":
+            _apply_gimbal(payload)
+            with STATE.lock:
+                gp = STATE.gimbal_preset
+                err = STATE.error
+            self._send_json(200, {"ok": not bool(err), "gimbal_preset": gp, "error": err})
+            return
+        if p == "/api/gps":
+            disabled = bool(payload.get("disabled", False))
+            _set_gps_disabled(disabled)
+            with STATE.lock:
+                err = STATE.error
+                gps_disabled = STATE.gps_disabled
+            self._send_json(200, {"ok": not bool(err), "gps_disabled": gps_disabled, "error": err})
+            return
+        if p == "/api/ekf_gps":
+            disabled = bool(payload.get("disabled", False))
+            _set_ekf_no_gps(disabled)
+            with STATE.lock:
+                err = STATE.error
+                ekf_no_gps = STATE.ekf_no_gps
+            self._send_json(200, {"ok": not bool(err), "ekf_no_gps": ekf_no_gps, "error": err})
+            return
+        if p == "/api/record/start":
+            _start_recording(payload)
+            with STATE.lock:
+                name = STATE.recording_name
+                min_sep_m = STATE.recording_min_sep_m
+            self._send_json(200, {"ok": True, "recording": True, "name": name, "min_sep_m": min_sep_m})
+            return
+        if p == "/api/record/stop":
+            try:
+                result = _stop_recording(payload)
+            except Exception as e:
+                _set_error(str(e))
+                with STATE.lock:
+                    err = STATE.error
+                self._send_json(400, {"ok": False, "error": err})
+                return
+            self._send_json(200, result)
+            return
+        if p == "/api/vbn/init":
+            simplified_fc = payload.get("simplified_fc")
+            if not isinstance(simplified_fc, dict):
+                self._send_json(400, {"ok": False, "error": "simplified_fc must be a GeoJSON FeatureCollection"})
+                return
+            playback = init_playback(simplified_fc)
+            if playback is None:
+                self._send_json(400, {"ok": False, "error": "could not build playback from simplified route"})
+                return
+            with STATE.lock:
+                STATE.vbn_playback = playback
+                STATE.error = ""
+            first = step_playback(playback, 0.0)
+            with STATE.lock:
+                STATE.vbn_playback = first["playback"]
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "lat": first["lat"],
+                    "lon": first["lon"],
+                    "heading_deg": first["heading_deg"],
+                    "done": bool(first.get("done")),
+                },
+            )
+            return
+        if p == "/api/vbn/step":
+            step = float(payload.get("step", 0.11))
+            step = max(0.001, min(1.0, step))
+            with STATE.lock:
+                playback = STATE.vbn_playback
+            if playback is None:
+                self._send_json(400, {"ok": False, "error": "vbn playback not initialized"})
+                return
+            frame = step_playback(playback, step)
+            with STATE.lock:
+                STATE.vbn_playback = frame["playback"]
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "lat": frame["lat"],
+                    "lon": frame["lon"],
+                    "heading_deg": frame["heading_deg"],
+                    "done": bool(frame.get("done")),
+                },
+            )
+            return
 
         self._send_json(404, {"error": "not found"})
 
@@ -221,11 +530,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    try:
+        import pymavlink  # noqa: F401
+    except Exception as e:
+        print(_pymavlink_import_error(e), file=sys.stderr, flush=True)
+
     host = "127.0.0.1"
     port = 8765
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"SITL bridge listening at http://{host}:{port}")
     print("POST /api/connect {\"connection\":\"udp:127.0.0.1:14550\"}")
+    print('POST /api/gimbal {"preset":"nadir"}  # RC6/7/8 gimbal — see uav_route.gimbal_rc')
     server.serve_forever()
 
 

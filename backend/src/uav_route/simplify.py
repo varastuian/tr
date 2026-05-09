@@ -7,6 +7,35 @@ from .geo import LL, angle_diff_deg, bearing_deg, cross_track_distance_m, havers
 from .mission import MAV_CMD, MissionItem
 
 
+def simplify_lat_lon_path(
+    points: Iterable[tuple[float, float]],
+    cfg: SimplifyConfig,
+) -> list[tuple[float, float]]:
+    """
+    Simplify an ordered path of (lat, lon) in degrees using the same prefilter
+    and Ramer–Douglas–Peucker pass as ``simplify_mission`` spatial chains.
+    """
+    spatial = [LL(float(lat), float(lon)) for lat, lon in points]
+    if len(spatial) < 2:
+        return [(p.lat, p.lon) for p in spatial]
+
+    pre: list[LL] = [spatial[0]]
+    for cand in spatial[1:]:
+        last = pre[-1]
+        if haversine_m(last, cand) < cfg.min_separation_m:
+            continue
+        if len(pre) >= 2:
+            prev = pre[-2]
+            br1 = bearing_deg(prev, last)
+            br2 = bearing_deg(last, cand)
+            if angle_diff_deg(br1, br2) < cfg.min_turn_deg:
+                continue
+        pre.append(cand)
+
+    keep_idx = _rdp_indices(pre, cfg.rdp_epsilon_m)
+    return [(pre[i].lat, pre[i].lon) for i in keep_idx]
+
+
 @dataclass(frozen=True)
 class SimplifyConfig:
     # Remove purely loiter navigation commands.

@@ -20,3 +20,7 @@ terrain/
 mav.parm
 cursor_continuation_of_previous_discuss.md
 
+# Generated Gazebo aerial mosaic (large)
+sim/models/tile_ground/materials/textures/mosaic.png
+sim/models/tile_ground/materials/textures/mosaic_meta.json
+

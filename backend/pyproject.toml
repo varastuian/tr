@@ -5,11 +5,26 @@ description = "Teach & repeat route simplifier for ArduPilot missions (loiter re
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "pymavlink>=2.4.40",
 ]
 
 [project.scripts]
 uav-route-demo = "uav_route.demo.generate_demo:main"
 uav-tiles = "uav_route.tiles.server:main"
+uav-sitl-bridge = "uav_route.sitl_bridge:main"
+uav-track-lib = "uav_route.track_library:main"
+uav-feature-map = "uav_route.feature_map.cli:main"
+uav-teach-repeat = "uav_route.teach_repeat:main"
+uav-simplify-mission = "uav_route.cli_simplify_route:main"
+
+[project.optional-dependencies]
+feature_map = [
+    "opencv-python-headless>=4.8.0",
+    "numpy>=1.24.0",
+]
+exe = [
+    "pyinstaller>=6.0",
+]
 
 [build-system]
 requires = ["hatchling>=1.25"]
