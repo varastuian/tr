@@ -30,13 +30,7 @@ jobs:
       - name: Build EXE
         run: |
           cd backend
-          python -m nuitka ^
-            --onefile ^
-            --standalone ^
-            --assume-yes-for-downloads ^
-            --output-dir=build ^
-            --output-filename=uav_route.exe ^
-            -m uav_route.cli_simplify_route
+          python -m nuitka --onefile --standalone --assume-yes-for-downloads --output-dir=build --output-filename=uav_route.exe -m uav_route.cli_simplify_route
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
