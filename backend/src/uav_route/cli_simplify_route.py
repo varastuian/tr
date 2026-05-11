@@ -27,6 +27,8 @@ From Python/C# via ``.exe``: run the executable with ``-i`` and ``-o`` paths
 from __future__ import annotations
 
 import argparse
+import copy
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -64,26 +66,43 @@ def _load_geojson_points(data: dict[str, Any]) -> list[tuple[float, float]]:
     return pts
 
 
-def _load_input(path: Path | None, lonlat: bool) -> tuple[str, Any]:
+def _load_input(path: Path | None, lonlat: bool) -> tuple[str, Any, dict[str, Any]]:
     text = path.read_text(encoding="utf-8") if path else sys.stdin.read()
+
+    stripped = text.lstrip()
+    if stripped.startswith("QGC WPL"):
+        from uav_route.mission_io import load_mission_items_from_qgc_wpl
+
+        return "mission", load_mission_items_from_qgc_wpl(text), {"source": "qgc-wpl"}
+
     data = json.loads(text)
 
     if isinstance(data, list):
-        return "points", _parse_coord_pairs(data, lonlat)
+        return "points", _parse_coord_pairs(data, lonlat), {"source": "json-array"}
 
     if not isinstance(data, dict):
         raise ValueError("JSON root must be an object or an array of coordinate pairs.")
 
+    # QGroundControl plan JSON export.
+    if data.get("fileType") == "Plan":
+        from uav_route.mission_io import load_mission_items_from_qgc_plan
+
+        return "mission", load_mission_items_from_qgc_plan(data), {
+            "source": "qgc-plan",
+            "plan_template": data,
+        }
+
+    # Internal mission JSON (`{"mission": [...]}`).
     if "mission" in data:
         from uav_route.mission import load_mission_json
 
-        return "mission", load_mission_json(data)
+        return "mission", load_mission_json(data), {"source": "mission-json"}
 
     if data.get("type") == "FeatureCollection" or "features" in data:
-        return "points", _load_geojson_points(data)
+        return "points", _load_geojson_points(data), {"source": "geojson"}
 
     if "points" in data and isinstance(data["points"], list):
-        return "points", _parse_coord_pairs(data["points"], lonlat)
+        return "points", _parse_coord_pairs(data["points"], lonlat), {"source": "points-json"}
 
     raise ValueError(
         "Unrecognized JSON: need "
@@ -120,6 +139,60 @@ def _points_to_geojson(points: list[tuple[float, float]]) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _to_qgc_plan_item(it: Any, do_jump_id: int) -> dict[str, Any]:
+    row = dict(it.raw) if isinstance(it.raw, dict) else {}
+    params = row.get("params")
+    if not isinstance(params, list):
+        params = [0.0] * 7
+    elif len(params) < 7:
+        params = list(params) + [0.0] * (7 - len(params))
+    else:
+        params = list(params[:7])
+
+    if it.lat is not None:
+        params[4] = float(it.lat)
+    if it.lon is not None:
+        params[5] = float(it.lon)
+    if it.alt is not None:
+        params[6] = float(it.alt)
+
+    row.update(
+        {
+            "autoContinue": bool(row.get("autoContinue", True)),
+            "command": int(it.command),
+            "doJumpId": int(row.get("doJumpId", do_jump_id)),
+            "frame": int(it.frame) if it.frame is not None else int(row.get("frame", 3)),
+            "params": params,
+            "type": str(row.get("type", "SimpleItem")),
+        }
+    )
+    return row
+
+
+def _mission_items_to_qgc_plan(
+    items: list[Any], plan_template: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    plan = copy.deepcopy(plan_template) if isinstance(plan_template, dict) else {}
+    if not isinstance(plan.get("mission"), dict):
+        plan["mission"] = {}
+
+    mission = plan["mission"]
+    mission["items"] = [_to_qgc_plan_item(it, idx + 1) for idx, it in enumerate(items)]
+
+    plan.setdefault("fileType", "Plan")
+    plan.setdefault("groundStation", "QGroundControl")
+    plan.setdefault("version", 1)
+    mission.setdefault("version", 2)
+    return plan
+
+
+def _app_version() -> str:
+    try:
+        return importlib.metadata.version("uav-route")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.1.0+local"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,9 +259,15 @@ def _main_impl(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--format",
-        choices=("json", "json-array", "geojson"),
+        choices=("json", "json-array", "geojson", "qgc-plan"),
         default="json",
-        help="Output shape for point lists (missions always emit {\"mission\": [...]}).",
+        help='Output shape. Use "qgc-plan" for QGroundControl .plan mission output.',
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"uav-simplify-mission {_app_version()}",
+        help="Show app version and exit.",
     )
 
     args = p.parse_args(argv)
@@ -203,12 +282,23 @@ def _main_impl(argv: list[str] | None = None) -> int:
         rdp_epsilon_m=args.rdp_epsilon_m,
     )
 
-    kind, payload = _load_input(args.input, args.lonlat)
+    kind, payload, meta = _load_input(args.input, args.lonlat)
 
     if kind == "mission":
         simplified = simplify_mission(payload, cfg)
-        out_obj: Any = _mission_items_to_json(simplified)
+        wants_qgc_plan = args.format == "qgc-plan" or (
+            meta.get("source") == "qgc-plan"
+            and args.output is not None
+            and args.output.suffix.lower() == ".plan"
+        )
+        if wants_qgc_plan:
+            template = meta.get("plan_template")
+            out_obj = _mission_items_to_qgc_plan(simplified, template)
+        else:
+            out_obj = _mission_items_to_json(simplified)
     else:
+        if args.format == "qgc-plan":
+            raise ValueError("Output format 'qgc-plan' only supports mission-style input.")
         simplified_pts = simplify_lat_lon_path(payload, cfg)
         if args.format == "json-array":
             out_obj = [[lat, lon] for lat, lon in simplified_pts]

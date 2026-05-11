@@ -1,0 +1,67 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "sag Python: simplify import example (.plan) ",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/src/uav_route/cli_simplify_route.py",
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/backend/src"
+      },
+      "args": [
+        "-i",
+        // "${workspaceFolder}/backend/examples/sample_qgc_plan.plan",
+        "/home/varas/Downloads/sag.plan",
+        "-o",
+        // "${workspaceFolder}/backend/examples/out_from_plan.json",
+        "/home/varas/Downloads/sagSimp.plan",
+        "--rdp-epsilon-m",
+        "8",
+        "--format",
+        "qgc-plan"
+      ]
+    },
+    {
+      "name": "Python: uav-simplify-mission (QGC .plan)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uav_route.cli_simplify_route",
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/backend/src"
+      },
+      "args": [
+        "-i",
+        // "${workspaceFolder}/backend/examples/sample_qgc_plan.plan",
+        "/home/varas/Downloads/sag.plan",
+        "-o",
+        "${workspaceFolder}/backend/examples/out_from_plan.json",
+        "--rdp-epsilon-m",
+        "8"
+      ]
+    },
+    {
+      "name": "Python: uav-simplify-mission (QGC .waypoints)",
+      "type": "python",
+      "request": "launch",
+      "module": "uav_route.cli_simplify_route",
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/backend/src"
+      },
+      "args": [
+        "-i",
+        "${workspaceFolder}/backend/examples/sample_qgc_waypoints.waypoints",
+        "-o",
+        "${workspaceFolder}/backend/examples/out_from_waypoints.json",
+        "--rdp-epsilon-m",
+        "8"
+      ]
+    }
+  ]
+}

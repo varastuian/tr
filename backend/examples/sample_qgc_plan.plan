@@ -1,0 +1,37 @@
+{
+  "fileType": "Plan",
+  "mission": {
+    "cruiseSpeed": 5,
+    "items": [
+      {
+        "autoContinue": true,
+        "command": 22,
+        "frame": 3,
+        "params": [0, 0, 0, 0, 37.0000000, -122.0000000, 50.0],
+        "type": "SimpleItem"
+      },
+      {
+        "autoContinue": true,
+        "command": 16,
+        "frame": 3,
+        "params": [0, 0, 0, 0, 37.0005000, -122.0005000, 50.0],
+        "type": "SimpleItem"
+      },
+      {
+        "autoContinue": true,
+        "command": 16,
+        "frame": 3,
+        "params": [0, 0, 0, 0, 37.0010000, -122.0010000, 50.0],
+        "type": "SimpleItem"
+      },
+      {
+        "autoContinue": true,
+        "command": 21,
+        "frame": 3,
+        "params": [0, 0, 0, 0, 37.0000000, -122.0000000, 0.0],
+        "type": "SimpleItem"
+      }
+    ]
+  }
+}
+

@@ -4,12 +4,16 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
 
   workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repo
@@ -24,15 +28,33 @@ jobs:
         run: |
           cd backend
           python -m pip install --upgrade pip
-          pip install nuitka
-          pip install .
+          python -m pip install .
+          python -m pip install nuitka
 
       - name: Build EXE
         run: |
           cd backend
-          python -m nuitka src/uav_route/cli_simplify_route.py --onefile --standalone --assume-yes-for-downloads --output-dir=build --output-filename=uav_route.exe
+          python -m nuitka src/uav_route/cli_simplify_route.py --onefile --standalone --assume-yes-for-downloads --output-dir=build --output-filename=uav-simplify-mission.exe
+
+      - name: Read app version
+        id: app_version
+        run: |
+          cd backend
+          $ver = python -c "import importlib.metadata as m; print(m.version('uav-route'))"
+          "value=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Check EXE version output
+        run: |
+          backend\build\uav-simplify-mission.exe --version
+
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
-          path: backend/build/*.exe
+          name: uav-simplify-mission-windows-${{ steps.app_version.outputs.value }}
+          path: backend/build/uav-simplify-mission.exe
+
+      - name: Upload EXE to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: backend/build/uav-simplify-mission.exe
