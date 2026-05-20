@@ -382,6 +382,61 @@ def _stop_recording(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _simplify_mission_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    mission_raw = payload.get("mission")
+    if not isinstance(mission_raw, list):
+        raise ValueError("mission must be an array")
+
+    items: list[MissionItem] = []
+    for idx, row_any in enumerate(mission_raw):
+        if not isinstance(row_any, dict):
+            continue
+        row = row_any
+        lat = row.get("lat")
+        lon = row.get("lon")
+        if lat is None or lon is None:
+            continue
+        items.append(
+            MissionItem(
+                seq=idx,
+                command=int(row.get("command", int(MAV_CMD.NAV_WAYPOINT))),
+                frame=int(row.get("frame", 3)),
+                lat=float(lat),
+                lon=float(lon),
+                alt=float(row.get("alt", 25)),
+                raw=dict(row),
+            )
+        )
+    if len(items) < 2:
+        raise ValueError("mission must include at least two spatial points")
+
+    args = payload.get("args")
+    args_obj = args if isinstance(args, dict) else {}
+    fast_return = bool(args_obj.get("fast_return", False))
+    max_shortcut = min(300.0, max(10.0, float(args_obj.get("max_shortcut_deviation_m", 300.0))))
+
+    if fast_return:
+        from uav_route.shortcut_return import mission_fast_return
+
+        simplified = mission_fast_return(items, max_shortcut)
+    else:
+        cfg = SimplifyConfig(
+            remove_loiter=bool(args_obj.get("remove_loiter", True)),
+            min_separation_m=max(0.0, float(args_obj.get("min_separation_m", 2.0))),
+            min_turn_deg=max(0.0, float(args_obj.get("min_turn_deg", 6.0))),
+            rdp_epsilon_m=max(0.0, float(args_obj.get("rdp_epsilon_m", 8.0))),
+        )
+        simplified = simplify_mission(items, cfg)
+    return {
+        "ok": True,
+        "source": "python-bridge",
+        "points_in": len(items),
+        "points_out": len(simplified),
+        "taught_fc": mission_to_geojson(items, "taught"),
+        "simplified_fc": mission_to_geojson(simplified, "simplified"),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, data: dict[str, Any]) -> None:
         raw = json.dumps(data).encode("utf-8")
@@ -521,6 +576,14 @@ class Handler(BaseHTTPRequestHandler):
                     "done": bool(frame.get("done")),
                 },
             )
+            return
+        if p == "/api/simplify/mission":
+            try:
+                result = _simplify_mission_payload(payload)
+            except Exception as e:
+                self._send_json(400, {"ok": False, "error": str(e)})
+                return
+            self._send_json(200, result)
             return
 
         self._send_json(404, {"error": "not found"})

@@ -2,6 +2,17 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Debug sitl_bridge",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uav_route.sitl_bridge",
+      "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend/src"
+            },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "sag Python: simplify import example (.plan) ",
       "type": "debugpy",
       "request": "launch",

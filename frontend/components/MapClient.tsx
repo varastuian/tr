@@ -6,14 +6,17 @@ import {
   GeoJSON,
   LayersControl,
   MapContainer,
+  Marker,
   Pane,
   Polyline,
   TileLayer,
   Tooltip,
   useMap,
+  useMapEvents,
 } from "react-leaflet";
 import type { Feature, FeatureCollection, GeoJsonObject, Geometry } from "geojson";
 import L from "leaflet";
+import type { DrawNode } from "../lib/drawRoute";
 
 type AnyFC = FeatureCollection<Geometry, Record<string, unknown>>;
 
@@ -50,6 +53,19 @@ export default function MapClient({
   gazeboCameraUrl = "http://127.0.0.1:8080/stream",
   /** Sim tile overlay only: nadir = top-down map + crosshair; forward = heading cue line. */
   cameraSimMode = "forward",
+  drawMode = false,
+  drawNodes = [],
+  drawSelectedIndex = null,
+  placeLoiter = false,
+  onDrawMapClick,
+  onDrawSelect,
+  onDrawMove,
+  suppressDemo = false,
+  fitRouteTrigger = 0,
+  showLiveFollow = false,
+  showDrawLayer = true,
+  showTaughtLayer = true,
+  showSimplifiedLayer = true,
 }: {
   taught?: AnyFC | null;
   simplified?: AnyFC | null;
@@ -69,6 +85,19 @@ export default function MapClient({
   cameraSource?: "sim_tile" | "gazebo";
   gazeboCameraUrl?: string;
   cameraSimMode?: "nadir" | "forward";
+  drawMode?: boolean;
+  drawNodes?: DrawNode[];
+  drawSelectedIndex?: number | null;
+  placeLoiter?: boolean;
+  onDrawMapClick?: (lat: number, lon: number) => void;
+  onDrawSelect?: (index: number | null) => void;
+  onDrawMove?: (index: number, lat: number, lon: number) => void;
+  suppressDemo?: boolean;
+  fitRouteTrigger?: number;
+  showLiveFollow?: boolean;
+  showDrawLayer?: boolean;
+  showTaughtLayer?: boolean;
+  showSimplifiedLayer?: boolean;
 }) {
   const [taught, setTaught] = useState<AnyFC | null>(taughtProp ?? null);
   const [simplified, setSimplified] = useState<AnyFC | null>(simplifiedProp ?? null);
@@ -76,7 +105,7 @@ export default function MapClient({
 
   useEffect(() => {
     // If caller provides data, do not fetch demo.
-    if (taughtProp || simplifiedProp) {
+    if (taughtProp || simplifiedProp || suppressDemo) {
       setTaught(taughtProp ?? null);
       setSimplified(simplifiedProp ?? null);
       return;
@@ -94,7 +123,82 @@ export default function MapClient({
         setErr(e instanceof Error ? e.message : String(e));
       }
     })();
-  }, [taughtProp, simplifiedProp, demoStem]);
+  }, [taughtProp, simplifiedProp, demoStem, suppressDemo]);
+
+  function DrawClickCapture({
+    enabled,
+    onClick,
+  }: {
+    enabled: boolean;
+    onClick?: (lat: number, lon: number) => void;
+  }) {
+    useMapEvents({
+      click(e) {
+        if (!enabled || !onClick) return;
+        onClick(e.latlng.lat, e.latlng.lng);
+      },
+    });
+    return null;
+  }
+
+  function FitRoute({
+    trigger,
+    taughtFc,
+    simplifiedFc,
+  }: {
+    trigger: number;
+    taughtFc: AnyFC | null;
+    simplifiedFc: AnyFC | null;
+  }) {
+    const map = useMap();
+    useEffect(() => {
+      if (trigger === 0) return;
+      const all = [taughtFc, simplifiedFc].filter(Boolean) as AnyFC[];
+      const pts: Array<[number, number]> = [];
+      for (const fc of all) {
+        for (const f of fc.features) {
+          const g = f.geometry;
+          if (!g) continue;
+          if (g.type === "Point") {
+            const c = g.coordinates as number[];
+            pts.push([c[1], c[0]]);
+          } else if (g.type === "LineString") {
+            for (const c of g.coordinates as number[][]) pts.push([c[1], c[0]]);
+          }
+        }
+      }
+      if (pts.length === 0) return;
+      map.fitBounds(L.latLngBounds(pts), { padding: [28, 28], maxZoom: 18 });
+    }, [trigger, map, taughtFc, simplifiedFc]);
+    return null;
+  }
+
+  function makeNumberedDrawIcon(order: number, selected: boolean): L.DivIcon {
+    const d = 30;
+    const border = selected ? "#ea580c" : "#6d28d9";
+    const fill = selected ? "#fef3c7" : "#ede9fe";
+    const color = selected ? "#9a3412" : "#5b21b6";
+    return L.divIcon({
+      className: "draw-wp-marker",
+      iconSize: [d, d],
+      iconAnchor: [d / 2, d / 2],
+      html: `<div class="draw-wp-marker-inner" style="
+        width:${d}px;height:${d}px;border-radius:9999px;
+        background:${fill};border:3px solid ${border};
+        color:${color};font:700 13px/24px ui-sans-serif,system-ui,sans-serif;
+        display:flex;align-items:center;justify-content:center;
+        box-shadow:0 2px 6px rgba(0,0,0,0.22);
+      ">${order}</div>`,
+    });
+  }
+
+  const drawLine = useMemo<Array<[number, number]>>(
+    () => drawNodes.map((n) => [n.lat, n.lon]),
+    [drawNodes],
+  );
+
+  /** Draw visuals live outside LayersControl so an unchecked overlay cannot hide what you clicked. */
+  const drawHint = drawMode ? (placeLoiter ? "Draw mode: loiter" : "Draw mode: waypoint") : null;
 
   const center = useMemo<[number, number]>(() => {
     const fc = taught ?? simplified;
@@ -154,12 +258,14 @@ export default function MapClient({
       <MapContainer center={center} zoom={uavMapZoom} style={{ height: "100%", width: "100%" }}>
         {liveState ? (
           <FollowUav
-            enabled={autoPan}
+            enabled={showLiveFollow || autoPan}
             lat={liveState.lat}
             lon={liveState.lon}
             zoom={uavMapZoom}
           />
         ) : null}
+        <DrawClickCapture enabled={drawMode} onClick={onDrawMapClick} />
+        <FitRoute trigger={fitRouteTrigger} taughtFc={taught} simplifiedFc={simplified} />
         <LayersControl position="topright">
           <LayersControl.BaseLayer name="Satellite + labels (Esri)">
             <>
@@ -209,64 +315,62 @@ export default function MapClient({
           </LayersControl.BaseLayer>
         </LayersControl>
 
-        <Pane name="taught" style={{ zIndex: 400 }}>
-          {taught ? (
-            <GeoJSON
-              data={taught as unknown as GeoJsonObject}
-              style={(f) => {
-                const kind = (f as Feature).properties?.kind;
-                if (kind === "route") return { color: "#2563eb", weight: 4, opacity: 0.9 };
-                return {};
-              }}
-              pointToLayer={(feature, latlng) => {
-                const p = feature.properties as Record<string, unknown>;
-                const seq = typeof p.seq === "number" ? p.seq : undefined;
-                const cmd = typeof p.command === "number" ? p.command : undefined;
-                return L.circleMarker(latlng, {
-                  radius: 5,
-                  color: "#1d4ed8",
-                  weight: 2,
-                  fillOpacity: 0.2,
-                }).bindTooltip(`taught seq=${seq} cmd=${cmd}`, {
-                  direction: "top",
-                  offset: L.point(0, -6),
-                  opacity: 0.95,
-                });
-              }}
-            />
-          ) : null}
-        </Pane>
+        {showTaughtLayer && taught ? (
+          <GeoJSON
+            key={`taught-${fitRouteTrigger}-${taught.features?.length ?? 0}`}
+            data={taught as unknown as GeoJsonObject}
+            style={(f) => {
+              const kind = (f as Feature).properties?.kind;
+              if (kind === "route") return { color: "#2563eb", weight: 4, opacity: 0.9 };
+              return {};
+            }}
+            pointToLayer={(feature, latlng) => {
+              const p = feature.properties as Record<string, unknown>;
+              const seq = typeof p.seq === "number" ? p.seq : undefined;
+              const cmd = typeof p.command === "number" ? p.command : undefined;
+              return L.circleMarker(latlng, {
+                radius: 5,
+                color: "#1d4ed8",
+                weight: 2,
+                fillOpacity: 0.2,
+              }).bindTooltip(`taught seq=${seq} cmd=${cmd}`, {
+                direction: "top",
+                offset: L.point(0, -6),
+                opacity: 0.95,
+              });
+            }}
+          />
+        ) : null}
 
-        <Pane name="simplified" style={{ zIndex: 450 }}>
-          {simplified ? (
-            <GeoJSON
-              data={simplified as unknown as GeoJsonObject}
-              style={(f) => {
-                const kind = (f as Feature).properties?.kind;
-                if (kind === "route") return { color: "#16a34a", weight: 4, opacity: 0.9 };
-                return {};
-              }}
-              pointToLayer={(feature, latlng) => {
-                const p = feature.properties as Record<string, unknown>;
-                const seq = typeof p.seq === "number" ? p.seq : undefined;
-                const cmd = typeof p.command === "number" ? p.command : undefined;
-                return L.circleMarker(latlng, {
-                  radius: 4,
-                  color: "#15803d",
-                  weight: 2,
-                  fillOpacity: 0.2,
-                }).bindTooltip(`simplified seq=${seq} cmd=${cmd}`, {
-                  direction: "top",
-                  offset: L.point(0, -6),
-                  opacity: 0.95,
-                });
-              }}
-            />
-          ) : null}
-        </Pane>
+        {showSimplifiedLayer && simplified ? (
+          <GeoJSON
+            key={`simplified-${fitRouteTrigger}-${simplified.features?.length ?? 0}`}
+            data={simplified as unknown as GeoJsonObject}
+            style={(f) => {
+              const kind = (f as Feature).properties?.kind;
+              if (kind === "route") return { color: "#16a34a", weight: 4, opacity: 0.9 };
+              return {};
+            }}
+            pointToLayer={(feature, latlng) => {
+              const p = feature.properties as Record<string, unknown>;
+              const seq = typeof p.seq === "number" ? p.seq : undefined;
+              const cmd = typeof p.command === "number" ? p.command : undefined;
+              return L.circleMarker(latlng, {
+                radius: 4,
+                color: "#15803d",
+                weight: 2,
+                fillOpacity: 0.2,
+              }).bindTooltip(`simplified seq=${seq} cmd=${cmd}`, {
+                direction: "top",
+                offset: L.point(0, -6),
+                opacity: 0.95,
+              });
+            }}
+          />
+        ) : null}
 
         {liveState ? (
-          <Pane name="uav" style={{ zIndex: 700 }}>
+          <>
             <CircleMarker
               center={[liveState.lat, liveState.lon]}
               radius={7}
@@ -287,7 +391,35 @@ export default function MapClient({
               ]}
               pathOptions={{ color: "#f97316", weight: 3 }}
             />
-          </Pane>
+          </>
+        ) : null}
+
+        {showDrawLayer ? (
+        <Pane name="draw_always" style={{ zIndex: 600 }}>
+          {drawLine.length >= 2 ? (
+            <Polyline positions={drawLine} pathOptions={{ color: "#7c3aed", weight: 4, opacity: 0.95 }} />
+          ) : null}
+          {drawNodes.map((node, idx) => (
+            <Marker
+              key={`${idx}-${node.kind}`}
+              position={[node.lat, node.lon]}
+              draggable
+              icon={makeNumberedDrawIcon(idx + 1, drawSelectedIndex === idx)}
+              eventHandlers={{
+                click: () => onDrawSelect?.(idx),
+                dragend: (e) => {
+                  const latlng = (e.target as L.Marker).getLatLng();
+                  onDrawMove?.(idx, latlng.lat, latlng.lng);
+                },
+              }}
+            >
+              <Tooltip direction="top" opacity={0.95}>
+                {node.kind} #{idx + 1}
+                {node.kind === "loiter" ? ` r=${node.radiusM}m` : ""}
+              </Tooltip>
+            </Marker>
+          ))}
+        </Pane>
         ) : null}
 
         {err ? (
@@ -402,6 +534,24 @@ export default function MapClient({
               )}
             </MapContainer>
           )}
+        </div>
+      ) : null}
+      {drawHint ? (
+        <div
+          style={{
+            position: "absolute",
+            left: 14,
+            top: 14,
+            zIndex: 1300,
+            background: "rgba(255,255,255,0.9)",
+            border: "1px solid #ddd6fe",
+            color: "#5b21b6",
+            borderRadius: 8,
+            padding: "4px 8px",
+            fontSize: 12,
+          }}
+        >
+          {drawHint}
         </div>
       ) : null}
     </div>

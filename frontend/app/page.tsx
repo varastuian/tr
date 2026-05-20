@@ -1,12 +1,11 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { parseQgcWpl110 } from "../lib/qgcWpl";
-import { parseQgcPlan } from "../lib/qgcPlan";
-import { missionToGeoJson } from "../lib/geojson";
-import { simplifyMission } from "../lib/simplifyMission";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AnyFC } from "../lib/geojson";
+import type { DrawNode } from "../lib/drawRoute";
+import { getBridgeUrl } from "../lib/bridgeUrl";
+import { simplifyDrawNodes, simplifyRouteUpload } from "../lib/simplifyRouteApi";
 import {
   deleteTrack,
   getTrack,
@@ -38,11 +37,20 @@ const MapClient = dynamic(() => import("../components/MapClient"), {
 });
 
 export default function Home() {
+  const drawOnlyMode = true;
   const [taughtFc, setTaughtFc] = useState<AnyFC | null>(null);
   const [simplifiedFc, setSimplifiedFc] = useState<AnyFC | null>(null);
   const [importErr, setImportErr] = useState<string | null>(null);
   const [importName, setImportName] = useState<string | null>(null);
-  const [routeSource, setRouteSource] = useState<"import" | "record">("import");
+  const [routeSource, setRouteSource] = useState<"import" | "record" | "draw">("draw");
+  const [drawModeActive, setDrawModeActive] = useState(true);
+  const [drawNodes, setDrawNodes] = useState<DrawNode[]>([]);
+  const [drawSelectedIndex, setDrawSelectedIndex] = useState<number | null>(null);
+  const [placeLoiter, setPlaceLoiter] = useState(false);
+  const [loiterRadiusM, setLoiterRadiusM] = useState(50);
+  const [drawBusy, setDrawBusy] = useState(false);
+  const [simplifyWarning, setSimplifyWarning] = useState<string | null>(null);
+  const [fitRouteTrigger, setFitRouteTrigger] = useState(0);
   const [demo, setDemo] = useState<"taught_mission" | "complex_mission">("taught_mission");
   const [sitlConn, setSitlConn] = useState("udp:127.0.0.1:14550");
   const [uavMapZoom, setUavMapZoom] = useState(17);
@@ -69,6 +77,17 @@ export default function Home() {
   const [gimbalYaw, setGimbalYaw] = useState(1500);
   const [recordName, setRecordName] = useState("sitl_taught_route");
   const [recordBusy, setRecordBusy] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [simplifyRemoveLoiter, setSimplifyRemoveLoiter] = useState(true);
+  const [simplifyMinSeparationM, setSimplifyMinSeparationM] = useState(2);
+  const [simplifyMinTurnDeg, setSimplifyMinTurnDeg] = useState(6);
+  const [simplifyRdpEpsilonM, setSimplifyRdpEpsilonM] = useState(8);
+  const [fastReturnMode, setFastReturnMode] = useState(true);
+  const [maxShortcutDeviationM, setMaxShortcutDeviationM] = useState(300);
+  const [requirePythonBridge, setRequirePythonBridge] = useState(true);
+  const [showDrawLayer, setShowDrawLayer] = useState(true);
+  const [showTaughtLayer, setShowTaughtLayer] = useState(true);
+  const [showSimplifiedLayer, setShowSimplifiedLayer] = useState(true);
 
   const savedTracks = useMemo(() => listSavedTracks(), [libBump]);
 
@@ -97,53 +116,65 @@ export default function Home() {
     };
   }, [vbnSimEnabled, vbnFrame, simplifiedFc, bridgeState, overlayCamZoom]);
 
-  const mapEl = useMemo(
-    () => (
-      <MapClient
-        taught={taughtFc}
-        simplified={simplifiedFc}
-        demoStem={demo}
-        liveState={displayLive}
-        cameraZoom={displayLive?.camera_zoom ?? overlayCamZoom}
-        uavMapZoom={uavMapZoom}
-        autoPan={autoPanMap}
-        showCameraOverlay={showCameraOverlay}
-        cameraSource={cameraSource}
-        gazeboCameraUrl={gazeboCameraUrl}
-        cameraSimMode={cameraSimMode}
-      />
-    ),
+  const handleDrawMapClick = useCallback(
+    (lat: number, lon: number) => {
+      if (placeLoiter) {
+        setDrawNodes((nodes) => [
+          ...nodes,
+          { kind: "loiter", lat, lon, radiusM: loiterRadiusM },
+        ]);
+      } else {
+        setDrawNodes((nodes) => [...nodes, { kind: "waypoint", lat, lon }]);
+      }
+    },
+    [placeLoiter, loiterRadiusM],
+  );
+
+  const handleDrawMove = useCallback((index: number, lat: number, lon: number) => {
+    setDrawNodes((nodes) => nodes.map((n, i) => (i === index ? { ...n, lat, lon } : n)));
+  }, []);
+
+  const showLiveFollow = false;
+
+  const selectedNode =
+    drawSelectedIndex !== null ? drawNodes[drawSelectedIndex] ?? null : null;
+  const simplifyTune = useMemo(
+    () => ({
+      removeLoiter: simplifyRemoveLoiter,
+      minSeparationM: simplifyMinSeparationM,
+      minTurnDeg: simplifyMinTurnDeg,
+      rdpEpsilonM: simplifyRdpEpsilonM,
+      fastReturnMode,
+      maxShortcutDeviationM,
+      pythonOnly: requirePythonBridge,
+    }),
     [
-      taughtFc,
-      simplifiedFc,
-      demo,
-      displayLive,
-      overlayCamZoom,
-      uavMapZoom,
-      autoPanMap,
-      showCameraOverlay,
-      cameraSource,
-      gazeboCameraUrl,
-      cameraSimMode,
+      simplifyMinSeparationM,
+      simplifyMinTurnDeg,
+      simplifyRdpEpsilonM,
+      simplifyRemoveLoiter,
+      fastReturnMode,
+      maxShortcutDeviationM,
+      requirePythonBridge,
     ],
   );
 
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      try {
-        const res = await fetch("http://127.0.0.1:8765/api/state");
-        if (!res.ok) return;
-        const data = (await res.json()) as BridgeSnap;
-        setBridgeState(data);
-        if (typeof data.camera_zoom === "number") {
-          setOverlayCamZoom(data.camera_zoom);
-        }
-      } catch {
-        // bridge not running yet
-      }
-    }, 800);
-    return () => clearInterval(timer);
-  }, []);
+  // useEffect(() => {
+  //   const timer = setInterval(async () => {
+  //     try {
+  //       const res = await fetch(`${getBridgeUrl()}/api/state`);
+  //       if (!res.ok) return;
+  //       const data = (await res.json()) as BridgeSnap;
+  //       setBridgeState(data);
+  //       if (typeof data.camera_zoom === "number") {
+  //         setOverlayCamZoom(data.camera_zoom);
+  //       }
+  //     } catch {
+  //       // bridge not running yet
+  //     }
+  //   }, 800);
+  //   return () => clearInterval(timer);
+  // }, []);
 
   useEffect(() => {
     if (!vbnSimEnabled || !simplifiedFc) {
@@ -153,7 +184,7 @@ export default function Home() {
     let active = true;
     const init = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8765/api/vbn/init", {
+        const res = await fetch(`${getBridgeUrl()}/api/vbn/init`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ simplified_fc: simplifiedFc }),
@@ -169,7 +200,7 @@ export default function Home() {
     void init();
     const id = window.setInterval(async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8765/api/vbn/step", {
+        const res = await fetch(`${getBridgeUrl()}/api/vbn/step`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ step: 0.11 }),
@@ -189,7 +220,7 @@ export default function Home() {
   }, [vbnSimEnabled, simplifiedFc]);
 
   const sendBridge = async (path: string, payload: Record<string, unknown>) => {
-    await fetch(`http://127.0.0.1:8765${path}`, {
+    await fetch(`${getBridgeUrl()}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -198,7 +229,7 @@ export default function Home() {
 
   useEffect(() => {
     const preset = cameraSimMode === "nadir" ? "nadir" : "forward";
-    void fetch("http://127.0.0.1:8765/api/gimbal", {
+    void fetch(`${getBridgeUrl()}/api/gimbal`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ preset }),
@@ -215,29 +246,343 @@ export default function Home() {
         </div>
 
         <div className="section">
+          <div className="small">
+            <span className="pill">Simplification tuning</span> send these args to Python simplifier.
+          </div>
+          <div className="row" style={{ marginTop: 8, flexWrap: "wrap", gap: 8 }}>
+            <label className="small" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={simplifyRemoveLoiter}
+                onChange={(e) => setSimplifyRemoveLoiter(e.target.checked)}
+              />
+              Remove loiter
+            </label>
+            <label className="small">
+              Min separation (m)
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={simplifyMinSeparationM}
+                onChange={(e) => setSimplifyMinSeparationM(Number(e.target.value))}
+                style={{ width: 82, marginLeft: 6 }}
+              />
+            </label>
+            <label className="small">
+              Min turn (deg)
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={simplifyMinTurnDeg}
+                onChange={(e) => setSimplifyMinTurnDeg(Number(e.target.value))}
+                style={{ width: 82, marginLeft: 6 }}
+              />
+            </label>
+            <label className="small">
+              RDP epsilon (m)
+              <input
+                type="number"
+                min={0.1}
+                step={0.5}
+                value={simplifyRdpEpsilonM}
+                onChange={(e) => setSimplifyRdpEpsilonM(Number(e.target.value))}
+                style={{ width: 82, marginLeft: 6 }}
+              />
+            </label>
+            <label className="small" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={fastReturnMode}
+                onChange={(e) => setFastReturnMode(e.target.checked)}
+              />
+              Fast return (end → start)
+            </label>
+            <label className="small" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={requirePythonBridge}
+                onChange={(e) => setRequirePythonBridge(e.target.checked)}
+              />
+              Require Python bridge (recommended for colleagues — same backend code)
+            </label>
+            <label className="small">
+              Shortcut corridor (m, max 300)
+              <input
+                type="number"
+                min={10}
+                max={300}
+                step={10}
+                value={maxShortcutDeviationM}
+                disabled={!fastReturnMode}
+                onChange={(e) =>
+                  setMaxShortcutDeviationM(Math.min(300, Math.max(10, Number(e.target.value))))
+                }
+                style={{ width: 82, marginLeft: 6 }}
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="section">
+          <div className="small">
+            <span className="pill">Map layers</span> toggle what you see (left panel — reliable on/off).
+          </div>
+          <div className="row" style={{ marginTop: 8, flexWrap: "wrap", gap: 12 }}>
+            <label className="small" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={showDrawLayer}
+                onChange={(e) => setShowDrawLayer(e.target.checked)}
+              />
+              Draw (purple, numbered WPs)
+            </label>
+            <label className="small" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={showTaughtLayer}
+                onChange={(e) => setShowTaughtLayer(e.target.checked)}
+              />
+              Taught (blue)
+            </label>
+            <label className="small" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={showSimplifiedLayer}
+                onChange={(e) => setShowSimplifiedLayer(e.target.checked)}
+              />
+              Simplified (green)
+            </label>
+          </div>
+        </div>
+
+        <div className="section">
           <div className="row">
             <span className="pill">Data source</span>
             <span className="small">
               {importName ? `Imported: ${importName}` : "/public/demo/*.geojson"}
             </span>
           </div>
-          <div className="row" style={{ marginTop: 8 }}>
-            <span className="small">Teach source</span>
-            <select
-              value={routeSource}
-              onChange={(e) => setRouteSource(e.target.value as "import" | "record")}
-            >
-              <option value="import">Import mission file</option>
-              <option value="record">Record live UAV route</option>
-            </select>
+          <div className="small" style={{ marginTop: 8 }}>
+            Draw-only mode: click map to add nodes, then run simplification.
+          </div>
+          <div className="small" style={{ marginTop: 8 }}>
+            <strong>Simplification runs in Python</strong> via <code>uav-sitl-bridge</code> on{" "}
+            <code>http://127.0.0.1:8765</code> (Fast return and classic RDP both use the same endpoint). Uncheck
+            &quot;Require Python bridge&quot; only to allow a browser fallback when the bridge is down. For the
+            layer panel (top-right), <strong>Taught route</strong> / <strong>Simplified route</strong> toggles should
+            work — they must not be wrapped in extra panes (fixed in this build).
           </div>
           <div className="small" style={{ marginTop: 8 }}>
             Generate demo files from the backend:
             <pre style={{ margin: "8px 0 0 0", whiteSpace: "pre-wrap" }}>
-              cd backend{"\n"}uv run uav-route-demo
+              cd backend{"\n"}source .venv/bin/activate{"\n"}pip install -e .{"\n"}uav-route-demo
             </pre>
           </div>
-          {routeSource === "import" ? (
+          {drawOnlyMode || routeSource === "draw" ? (
+            <div className="small" style={{ marginTop: 10 }}>
+              <div>
+                Click the map to add points. <strong>Drag</strong> a marker to move it. Select a point to edit
+                lat/lon below. Loiter uses your radius and is expanded for Python simplification.
+              </div>
+              <div className="row" style={{ marginTop: 8, flexWrap: "wrap", gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDrawModeActive(true);
+                    setPlaceLoiter(false);
+                    setImportErr(null);
+                    setSimplifyWarning(null);
+                  }}
+                >
+                  {drawModeActive && !placeLoiter ? "Adding waypoints…" : "Add waypoint"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDrawModeActive(true);
+                    setPlaceLoiter(true);
+                    setImportErr(null);
+                  }}
+                >
+                  {drawModeActive && placeLoiter ? "Adding loiter…" : "Add loiter"}
+                </button>
+                <button
+                  type="button"
+                  disabled={drawNodes.length === 0}
+                  onClick={() => {
+                    setDrawNodes((nodes) => nodes.slice(0, -1));
+                    setDrawSelectedIndex(null);
+                  }}
+                >
+                  Undo last
+                </button>
+                <button
+                  type="button"
+                  disabled={drawNodes.length === 0}
+                  onClick={() => {
+                    setDrawNodes([]);
+                    setDrawSelectedIndex(null);
+                  }}
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  disabled={drawBusy || drawNodes.length < 2}
+                  title={drawNodes.length < 2 ? "Add at least 2 points on the map first" : undefined}
+                  onClick={async () => {
+                    setDrawBusy(true);
+                    setImportErr(null);
+                    setSimplifyWarning(null);
+                    try {
+                      const data = await simplifyDrawNodes(drawNodes, simplifyTune);
+                      if (!data.taught_fc || !data.simplified_fc) {
+                        throw new Error("No GeoJSON returned from simplify");
+                      }
+                      setTaughtFc(data.taught_fc);
+                      setSimplifiedFc(data.simplified_fc);
+                      setImportName(
+                        `drawn (${drawNodes.length} nodes → ${data.points_out ?? "?"} pts, ${data.source ?? "?"})`,
+                      );
+                      if (data.warning) setSimplifyWarning(data.warning);
+                      setFitRouteTrigger((n) => n + 1);
+                      setDrawModeActive(true);
+                      setShowDrawLayer(false);
+                      setShowTaughtLayer(true);
+                      setShowSimplifiedLayer(true);
+                    } catch (err) {
+                      setImportErr(err instanceof Error ? err.message : String(err));
+                    } finally {
+                      setDrawBusy(false);
+                    }
+                  }}
+                >
+                  Simplify
+                </button>
+              </div>
+              <div className="row" style={{ marginTop: 8 }}>
+                <span className="small">Loiter radius (m)</span>
+                <input
+                  type="number"
+                  min={5}
+                  max={500}
+                  step={5}
+                  value={loiterRadiusM}
+                  onChange={(e) => {
+                    const r = Number(e.target.value);
+                    setLoiterRadiusM(r);
+                    if (selectedNode?.kind === "loiter" && drawSelectedIndex !== null) {
+                      setDrawNodes((nodes) =>
+                        nodes.map((n, i) =>
+                          i === drawSelectedIndex && n.kind === "loiter" ? { ...n, radiusM: r } : n,
+                        ),
+                      );
+                    }
+                  }}
+                  style={{ width: 72 }}
+                />
+              </div>
+              {selectedNode ? (
+                <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #e2e8f0" }}>
+                  <div className="small" style={{ fontWeight: 600, marginBottom: 6 }}>
+                    Selected: {selectedNode.kind === "loiter" ? "Loiter" : "Waypoint"}{" "}
+                    {(drawSelectedIndex ?? 0) + 1}
+                  </div>
+                  <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                    <label className="small" style={{ flex: "1 1 120px" }}>
+                      Lat
+                      <input
+                        type="number"
+                        step="0.000001"
+                        value={selectedNode.lat}
+                        onChange={(e) => {
+                          const lat = Number(e.target.value);
+                          if (drawSelectedIndex === null) return;
+                          setDrawNodes((nodes) =>
+                            nodes.map((n, i) => (i === drawSelectedIndex ? { ...n, lat } : n)),
+                          );
+                        }}
+                        style={{ width: "100%", marginTop: 2 }}
+                      />
+                    </label>
+                    <label className="small" style={{ flex: "1 1 120px" }}>
+                      Lon
+                      <input
+                        type="number"
+                        step="0.000001"
+                        value={selectedNode.lon}
+                        onChange={(e) => {
+                          const lon = Number(e.target.value);
+                          if (drawSelectedIndex === null) return;
+                          setDrawNodes((nodes) =>
+                            nodes.map((n, i) => (i === drawSelectedIndex ? { ...n, lon } : n)),
+                          );
+                        }}
+                        style={{ width: "100%", marginTop: 2 }}
+                      />
+                    </label>
+                    {selectedNode.kind === "loiter" ? (
+                      <label className="small" style={{ flex: "0 0 90px" }}>
+                        Radius m
+                        <input
+                          type="number"
+                          min={5}
+                          max={500}
+                          value={selectedNode.radiusM}
+                          onChange={(e) => {
+                            const radiusM = Number(e.target.value);
+                            if (drawSelectedIndex === null) return;
+                            setLoiterRadiusM(radiusM);
+                            setDrawNodes((nodes) =>
+                              nodes.map((n, i) =>
+                                i === drawSelectedIndex && n.kind === "loiter"
+                                  ? { ...n, radiusM }
+                                  : n,
+                              ),
+                            );
+                          }}
+                          style={{ width: "100%", marginTop: 2 }}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    style={{ marginTop: 8 }}
+                    onClick={() => {
+                      if (drawSelectedIndex === null) return;
+                      setDrawNodes((nodes) => nodes.filter((_, i) => i !== drawSelectedIndex));
+                      setDrawSelectedIndex(null);
+                    }}
+                  >
+                    Delete selected
+                  </button>
+                </div>
+              ) : null}
+              <div className="small" style={{ marginTop: 6 }}>
+                Nodes: {drawNodes.length}
+                {drawNodes.length < 2 ? (
+                  <span style={{ color: "#b45309" }}> — add at least 2 points to enable Simplify</span>
+                ) : null}
+                {drawModeActive
+                  ? placeLoiter
+                    ? " — click map to place loiter"
+                    : " — click map to add waypoint"
+                  : ""}
+                {drawBusy ? " — simplifying…" : ""}
+              </div>
+              {simplifyWarning ? (
+                <div style={{ marginTop: 8, color: "#b45309" }}>{simplifyWarning}</div>
+              ) : null}
+              {importErr ? <div style={{ marginTop: 8, color: "#991b1b" }}>{importErr}</div> : null}
+              <div className="small" style={{ marginTop: 8 }}>
+                Fast return: Python finds the <strong>shortest end→start</strong> path by jumping over WPs when the
+                shortcut stays within the corridor (m). Default corridor is 300&nbsp;m.
+              </div>
+            </div>
+          ) : routeSource === "import" ? (
             <>
               <div className="row" style={{ marginTop: 10 }}>
                 <span className="small">Demo route</span>
@@ -257,43 +602,50 @@ export default function Home() {
                 </select>
               </div>
               <div className="small" style={{ marginTop: 10 }}>
-                Import a Mission Planner/QGC mission file (.waypoints / .plan):
+                Import route file (.waypoints / .plan / JSON) — simplified by Python (
+                <code>vahidsimplifyroute</code>):
                 <div style={{ marginTop: 8 }}>
                   <input
                     type="file"
-                    accept=".waypoints,.txt,.plan,application/json"
+                    accept=".waypoints,.txt,.plan,.json,application/json"
+                    disabled={importBusy}
                     onChange={async (e) => {
                       const f = e.target.files?.[0];
                       if (!f) return;
                       setImportErr(null);
                       setImportName(f.name);
+                      setImportBusy(true);
                       try {
-                        const text = await f.text();
-                        const taught =
-                          f.name.toLowerCase().endsWith(".plan") || text.trim().startsWith("{")
-                            ? parseQgcPlan(text)
-                            : parseQgcWpl110(text);
-                        const simplified = simplifyMission(taught, {
-                          removeLoiter: true,
-                          minSeparationM: 2,
-                          minTurnDeg: 6,
-                          rdpEpsilonM: 10,
-                        });
-                        setTaughtFc(missionToGeoJson(taught, "taught"));
-                        setSimplifiedFc(missionToGeoJson(simplified, "simplified"));
+                        const content = await f.text();
+                        const data = await simplifyRouteUpload(f.name, content, simplifyTune);
+                        if (!data.taught_fc || !data.simplified_fc) {
+                          throw new Error("Bridge returned no GeoJSON");
+                        }
+                        setTaughtFc(data.taught_fc);
+                        setSimplifiedFc(data.simplified_fc);
+                        setFitRouteTrigger((n) => n + 1);
                       } catch (err) {
                         setTaughtFc(null);
                         setSimplifiedFc(null);
                         setImportErr(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setImportBusy(false);
+                        e.target.value = "";
                       }
                     }}
                   />
                 </div>
+                {importBusy ? (
+                  <div className="small" style={{ marginTop: 6 }}>
+                    Simplifying via Python bridge at <code>127.0.0.1:8765</code>…
+                  </div>
+                ) : null}
                 {importErr ? (
                   <div style={{ marginTop: 8, color: "#991b1b" }}>{importErr}</div>
                 ) : null}
                 <div className="small" style={{ marginTop: 8 }}>
-                  Tip: In QGC, save a mission as <code>.waypoints</code>.
+                  Requires <code>uav-sitl-bridge</code> running. Tip: save missions as{" "}
+                  <code>.waypoints</code> or JSON <code>[[lat,lon],...]</code>.
                 </div>
               </div>
             </>
@@ -330,7 +682,7 @@ export default function Home() {
                   onClick={async () => {
                     setRecordBusy(true);
                     try {
-                      const res = await fetch("http://127.0.0.1:8765/api/record/stop", {
+                      const res = await fetch(`${getBridgeUrl()}/api/record/stop`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ min_turn_deg: 6, rdp_epsilon_m: 8 }),
@@ -347,6 +699,7 @@ export default function Home() {
                       }
                       setTaughtFc(data.taught_fc);
                       setSimplifiedFc(data.simplified_fc);
+                      setFitRouteTrigger((n) => n + 1);
                       setImportName(data.name ?? recordName);
                       setImportErr(null);
                       setLibBump((n) => n + 1);
@@ -417,6 +770,7 @@ export default function Home() {
                 setImportName(t.name);
                 setImportErr(null);
                 setDemo("taught_mission");
+                setFitRouteTrigger((n) => n + 1);
               }}
             >
               Load
@@ -435,16 +789,18 @@ export default function Home() {
             </button>
           </div>
         </div>
-
-        <div className="section">
-          <div className="small">
-            Basemap can be switched from the map control (top-right). Includes:
-            Esri satellite+labels, OpenStreetMap, and Google (unofficial) satellite/hybrid
-            tiles (no key, may break anytime).
+        {!drawOnlyMode ? (
+          <div className="section">
+            <div className="small">
+              Basemap can be switched from the map control (top-right). Includes:
+              Esri satellite+labels, OpenStreetMap, and Google (unofficial) satellite/hybrid
+              tiles (no key, may break anytime).
+            </div>
           </div>
-        </div>
+        ) : null}
 
-        <div className="section">
+        {!drawOnlyMode ? (
+          <div className="section">
           <div className="h1" style={{ fontSize: 15, marginBottom: 8 }}>
             SITL Live
           </div>
@@ -549,7 +905,7 @@ export default function Home() {
                 checked={autoPanMap}
                 onChange={(e) => setAutoPanMap(e.target.checked)}
               />
-              Auto-pan map with UAV
+              Auto-pan map with UAV (off while drawing; never changes your zoom)
             </label>
           </div>
           <div className="row" style={{ marginTop: 8 }}>
@@ -663,10 +1019,35 @@ export default function Home() {
             /stream.
           </div>
         </div>
+        ) : null}
       </div>
 
       <div className="map">
-        {mapEl}
+        <MapClient
+          taught={taughtFc}
+          simplified={simplifiedFc}
+          demoStem={demo}
+          liveState={displayLive}
+          cameraZoom={displayLive?.camera_zoom ?? overlayCamZoom}
+          uavMapZoom={uavMapZoom}
+          showCameraOverlay={showCameraOverlay}
+          cameraSource={cameraSource}
+          gazeboCameraUrl={gazeboCameraUrl}
+          cameraSimMode={cameraSimMode}
+          drawMode={drawModeActive}
+          drawNodes={drawNodes}
+          drawSelectedIndex={drawSelectedIndex}
+          placeLoiter={placeLoiter}
+          onDrawMapClick={handleDrawMapClick}
+          onDrawSelect={setDrawSelectedIndex}
+          onDrawMove={handleDrawMove}
+          suppressDemo={drawOnlyMode || routeSource === "draw"}
+          fitRouteTrigger={fitRouteTrigger}
+          showLiveFollow={showLiveFollow}
+          showDrawLayer={showDrawLayer}
+          showTaughtLayer={showTaughtLayer}
+          showSimplifiedLayer={showSimplifiedLayer}
+        />
       </div>
     </div>
   );

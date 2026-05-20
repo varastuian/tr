@@ -32,6 +32,20 @@ Then in the frontend, pick the basemap:
 
 - `Local cache (offline) — http://127.0.0.1:8000`
 
+### Simplification HTTP API (`uav-sitl-bridge`, no SITL required)
+
+The map page can call **Python-only** simplification on **`http://127.0.0.1:8765`**. You do **not** need a MAVLink connection for this — only the bridge process:
+
+```bash
+cd backend
+source .venv/bin/activate   # if you use a venv
+pip install -e .
+PYTHONPATH=src python -m uav_route.sitl_bridge
+```
+
+- **`POST /api/simplify/mission`** — body: `{ "mission": [ { "lat", "lon", "alt", "command", "frame", ... }, ... ], "args": { "fast_return": true|false, "max_shortcut_deviation_m": 25, "remove_loiter": true, "min_separation_m": 2, "min_turn_deg": 6, "rdp_epsilon_m": 8 } }`
+- With **`fast_return: true`**, the backend runs the end→start shortcut algorithm in **`uav_route/shortcut_return.py`**. With **`fast_return: false`**, it uses **`simplify_mission`** (RDP + filters).
+
 ### Python-only teach & repeat (no frontend logic)
 
 Record taught route from SITL telemetry and save into track library:
